@@ -1,0 +1,197 @@
+#!/bin/bash
+
+function usage {
+    echo
+    echo "Usage: $0 [-k keyfile] [-d] [-nr] [-f] [--dry-run] name"
+    echo
+    echo "Removes A, AAAA, TXT, and optionally, PTR records for a name from (dynamic) DNS"
+    echo
+    echo "Options:"
+    echo "-k  --keyfile   DNS keyfile, default is $keyfile"
+    echo "-nr --noreverse Do not remove PTR (reverse) records"
+    echo "-nt --notxt     Do not remove TXT records"
+    echo "-f  --force     Force removal, no warnings, no dry-run"
+    echo "--dry-run       Just show me what will be done (default on)"
+    echo
+    exit 0
+}
+
+echo -n "Looking for nsupdate ... ";
+which nsupdate || exit 1
+
+
+debug=false
+force=false
+quiet=false
+noreverse=false
+dry_run=true
+name='(unset)'
+reverse6='(unset)'
+keyfile=~/.cert/Kmykey.key
+
+while [[ $1 =~ ^- ]]; do
+    case $1 in
+        "--debug"|"-d")
+            debug=true
+            ;;
+        "--force"|"-f")
+            dry_run=false
+            ;;
+        "--noreverse"|"-nr")
+            noreverse=true
+            ;;
+        "--notxt"|"-nt")
+            notxt=true
+            ;;
+        "--dry-run")
+            dry_run=true
+            ;;
+        "--key-file"|"-k")
+            shift
+            keyfile=$1
+            ;;
+        *)
+            echo "Unknown option $1"
+            echo; usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+name="$1"
+
+if [ "$name" = "" ]; then usage; fi
+
+# First check if name is a cname
+cname="$(dig +short CNAME "$name")"
+if [ "$cname" = "" ]; then true
+else
+  echo "$name is a CNAME for $cname"
+  echo "I don't do CNAMEs"
+  exit 1
+fi
+
+tempfile="$(mktemp)"
+revtfile="$(mktemp)"
+
+function inforevert {
+  echo
+  echo "Revert file is $revtfile"
+  echo "To revert all changes, try"
+  echo "nsupdate -v -k $keyfile < $revtfile"
+  echo
+  echo "Note: tempfiles are left behind. Clean up after yourself."
+  echo "Your mother does not work here."
+  echo
+}
+
+# Is there anything there?
+if [ "$name" = "" ]; then usage; fi
+if $debug; then echo "DEBUG: name is $name"; fi
+
+# Find ns. We have to pick one.
+ns="$(dig +noall +authority soa $name | awk '{print $5}' | sort -n | head -1)"
+if [ "$ns" = "" ]; then
+  echo "Unable to find SOA NS nameserver record for $name"
+  exit 1
+fi
+if $debug; then echo "NS is $ns"; fi
+
+
+# Find A and AAAA records
+n=0
+if $debug; then echo DEBUG: A, AAAA, and TXT records:; fi
+while read rname ttl class type value; do
+  if [ "$value" = "" -o "$rname" != "$name." ]; then echo "Warning: No A or AAAA record found"; fi
+  if $debug; then echo "  DEBUG: $type record is $value"; fi
+  if [ "$type" = "A" -o "$type" = "AAAA" ]; then
+    records[$n]="$value"; ((n++));
+  fi
+  echo "update delete $rname $ttl $class $type $value" >> "$tempfile"
+  echo "update add    $rname $ttl $class $type $value" >> "$revtfile"
+  echo send   >> $tempfile
+  echo send   >> $revtfile
+  echo answer >> $tempfile
+  echo answer >> $revtfile
+done < <(
+  dig +noall +answer A $name @$ns
+  dig +noall +answer AAAA $name @$ns
+  if $notxt; then true
+  else
+    dig +noall +answer TXT $name @$ns
+  fi
+)
+r=${#records[*]}
+
+if $noreverse; then true
+else
+  if $debug; then echo "DEBUG: PTR records:"; fi
+  # Find PTR record
+  if (( r>0 )); then
+    n=0
+    while read rname ttl class type value; do
+        ptrrecords[$n]="$ptr"; ((n++))
+        echo "update delete $rname $ttl $class $type $value" >> "$tempfile"
+        echo "update add    $rname $ttl $class $type $value" >> "$revtfile"
+        echo send   >> $tempfile
+        echo send   >> $revtfile
+        echo answer >> $tempfile
+        echo answer >> $revtfile
+        if [ "$value" = "$name." ]; then true
+        else
+          echo "  Warning: Reverse lookup for $rname $value does not match name $name., SWITCHING DRY-RUN ON" 1>&2
+          dry_run=true
+        fi
+    done < <(
+      for i in ${records[*]}; do
+      if reverse="$(host $i)"; then
+        reverse="$(echo $reverse | cut -d ' ' -f 1)"
+        pns="$(dig +noall +authority soa $reverse | awk '{print $5}' | sort -n | head -1)" # have to pick one
+        dig +noall +answer PTR $reverse @$pns
+      else
+        echo "  Warning: No reverse lookup for $i" 1>&2
+      fi
+
+      done
+    )
+
+  fi
+  if $debug; then echo DEBUG: number of ptr records: ${#ptrrecords[*]} 1>&2; fi
+fi
+p=${#ptrrecords[*]}
+
+if (( (r+p) == 0 )); then
+  echo "Found no records to remove"
+  exit 0
+fi
+
+if $dry_run; then
+  echo 
+  echo "DRY RUN MODE"
+fi
+  echo "Will run these commands against DNS:"
+  echo
+  cat $tempfile
+  echo
+if $dry_run; then
+  echo
+  echo "THIS IS DRY RUN MODE"
+  echo "To apply these changes for real, do"
+  echo "nsupdate -v -k $keyfile < $tempfile"
+  echo
+  echo "You may remove the tempfile or edit it and run the above command by hand"
+else
+  echo "Running commands:"
+  nsupdate -v -k "$keyfile" < $tempfile
+
+  if [ $? -eq 0 ]; then 
+    rm -v "$tempfile"
+  else
+    echo nsupdate failed, check output
+  fi
+fi
+
+inforevert
+
+

@@ -1,0 +1,57 @@
+#!/usr/bin/perl
+
+use strict;
+use File::Tail;
+
+my $ns="localhost";
+my $dig="/usr/bin/dig";
+my $git="/usr/bin/git";
+my $repo="/var/lib/followdns/dyn";
+my $logd="/var/log/followdns";
+my $line;
+my $log=File::Tail->new(
+  name=>"/var/log/daemon.log",
+  maxinterval=>10
+);
+
+unless ( -d "$repo" ) { die "No such directory $repo, $!"; }
+
+while (defined($line=$log->read)) {
+  if ( $line =~ /named\[\d+\]: client (\S+) ([^:]+): updating zone '([^\/]+)\/IN': (.+)/ ) {
+    my $client="$1";
+    my $key="$2";
+    my $zone="$3";
+    my $change="$4";
+
+    #print "DEBUG: client: $client, key: $key, zone: $zone, change: $change\n";
+
+    # Get the updated zone file
+    open(my $axfr, "$dig axfr $zone \@$ns |") or die "Unable to run $dig axfr $zone \@$ns, $!";
+    open(my $zonefile,'>', "$repo/$zone") or die "Unable to open $repo/$zone for writing, $!";
+    while (<$axfr>) { print $zonefile $_ unless /^;;/ ; }
+    close $axfr;
+    close $zonefile;
+
+
+    # Add the changes to a log file
+    open (my $logfile,'>>',"$logd/changes.log") or die "Unable to open $logd/changes.log for appending, $!";
+    print $logfile localtime . " key: $key, zone: $zone, client: $client, change: $change\n";
+    close $logfile;
+
+    # Let's hope the sorting is the same every time
+    # Check in changes. Upgrade to Git::Repository some other time
+    chdir "$repo";
+    die "$repo is not a git repo" unless ( -d ".git" ); 
+    my @sysargs;
+    #@sysargs=("$git", 'add', "$zone", "changes.log");
+    @sysargs=("$git", 'add', "$zone");
+    system (@sysargs) == 0 or die "Unable to run @sysargs, $! ";
+    @sysargs=("$git", 'commit', "-m", 
+      "key: $key, zone: $zone, client: $client, change: $change");
+    system (@sysargs) == 0 or print "Unable to run @sysargs, change might be within one single zone file. $! ";
+    @sysargs=("$git", 'push');
+    system (@sysargs) == 0 or print "Unable to run @sysargs, $! ";
+  }
+}
+
+

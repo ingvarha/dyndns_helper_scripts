@@ -1,0 +1,3 @@
+#!/bin/bash
+
+ssh -i /etc/followdns/dyndns_to_git_automation_key $@

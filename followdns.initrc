@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# This script points to the ssh keys used
+GIT_SSH="/usr/local/lib/followdns/ssh_wrap"
+
+NAME="followdns"
+RUNTIME="/usr/bin/perl"
+DAEMON="/usr/local/sbin/followdns"
+OUTPUT="/var/log/followdns/debug.log"
+RUNAS="followdns"
+
+if [ "$USER" != "$RUNAS" ]; then
+	if [ $USER = "root" ]; then
+		su $RUNAS -c "$0 $@"
+		exit $?
+	else
+		echo "You're neither root nor app user"
+		exit 42
+	fi
+fi
+
+test -x $DAEMON || { echo "${DAEMON} has no execute bit"; exit 0; }
+
+status() {
+	if pid="$(pgrep -f "^$RUNTIME $DAEMON")"; then
+		echo $NAME is running with pid $pid
+		return 0
+	else
+		echo $NAME is stopped
+		return 1
+	fi
+}
+
+stop() {
+	if status >/dev/null; then
+		echo -n "stopping $NAME ... "
+		echo "" >> $OUTPUT
+		echo "`date` Stopping $NAME" >> $OUTPUT
+		echo "" >> $OUTPUT
+
+		pkill -f "^$RUNTIME $DAEMON"
+		if status > /dev/null; then echo failed; else echo $name stopped; fi
+	else
+		echo $NAME not running
+	fi
+}
+
+start() {
+	if status > /dev/null ; then
+		echo $NAME is already running
+	else
+		echo -n "Starting $NAME ... "
+		echo "" >> $OUTPUT
+		echo "`date` Starting $NAME" >> $OUTPUT
+		echo "" >> $OUTPUT
+
+		export GIT_SSH
+		"$RUNTIME" "$DAEMON" >> $OUTPUT 2>&1 &
+		if status > /dev/null; then echo started; else echo failed; fi
+	fi
+}		
+
+case $1 in
+	status)
+		status
+		exit $?
+		;;
+	stop)
+		stop
+		exit $?
+		;;
+	start)
+		start
+		exit $?
+		;;
+	restart)
+		stop
+		sleep 1
+		start
+		exit $?
+		;;
+	*)
+		echo eh, what?
+		exit 1
+		;;
+esac
