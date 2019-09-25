@@ -2,22 +2,23 @@
 
 use strict;
 use File::Tail;
+use Net::Domain qw(hostfqdn);
 
 my $ns="localhost";
 my $dig="/usr/bin/dig";
-my $git="/usr/bin/git";
+my $git="git";
 my $repo="/var/lib/followdns/dyn";
 my $logd="/var/log/followdns";
-my $line;
 my $log=File::Tail->new(
   name=>"/var/log/daemon.log",
   maxinterval=>10
-);
+    );
+my $commiter = (getpwuid($>))[0] . '@' . hostfqdn();
 
 unless ( -d "$repo" ) { die "No such directory $repo, $!"; }
 
-while (defined($line=$log->read)) {
-  if ( $line =~ /named\[\d+\]: client (\S+) ([^:]+): updating zone '([^\/]+)\/IN': (.+)/ ) {
+while (defined(my $line = $log->read)) {
+  if ( $line =~ m{named\[\d+\]: client (\S+?)/key ([^:]+): updating zone '(.+?)/IN': (.+)} ) {
     my $client="$1";
     my $key="$2";
     my $zone="$3";
@@ -28,30 +29,44 @@ while (defined($line=$log->read)) {
     # Get the updated zone file
     open(my $axfr, "$dig axfr $zone \@$ns |") or die "Unable to run $dig axfr $zone \@$ns, $!";
     open(my $zonefile,'>', "$repo/$zone") or die "Unable to open $repo/$zone for writing, $!";
-    while (<$axfr>) { print $zonefile $_ unless /^;;/ ; }
+    my $serial = 0;
+    while (<$axfr>) {
+      # Extract serial and replace it with magic string to reduce noise in diff
+      if (s{^($zone\. \s+
+          \d+ # TTL
+          \s+ IN \s+ SOA \s+
+          \S+ # master
+          \s+
+          \S+ # tech-c
+          \s+)(\d+) # serial
+          } {$1(serial)}x)
+      {
+        next if $serial; # no reason to include SOA twice
+        $serial = $2;
+      }
+      print $zonefile $_ unless /^;;/ ;
+    }
     close $axfr;
     close $zonefile;
 
-
     # Add the changes to a log file
     open (my $logfile,'>>',"$logd/changes.log") or die "Unable to open $logd/changes.log for appending, $!";
-    print $logfile localtime . " key: $key, zone: $zone, client: $client, change: $change\n";
+    print $logfile localtime . " key: $key, zone: $zone, client: $client, serial: $serial, change: $change\n";
     close $logfile;
 
     # Let's hope the sorting is the same every time
     # Check in changes. Upgrade to Git::Repository some other time
-    chdir "$repo";
+    chdir "$repo" or die "$repo: chdir failed: $!";
     die "$repo is not a git repo" unless ( -d ".git" ); 
     my @sysargs;
     #@sysargs=("$git", 'add', "$zone", "changes.log");
-    @sysargs=("$git", 'add', "$zone");
+    @sysargs = ($git, 'add', $zone);
     system (@sysargs) == 0 or die "Unable to run @sysargs, $! ";
-    @sysargs=("$git", 'commit', "-m", 
-      "key: $key, zone: $zone, client: $client, change: $change");
+    @sysargs = ($git, 'commit',
+                '--author', "\"key $key\" <$commiter>",
+                "-m", "serial $serial: $change (client $client)");
     system (@sysargs) == 0 or print "Unable to run @sysargs, change might be within one single zone file. $! ";
-    @sysargs=("$git", 'push');
+    @sysargs = ($git, 'push');
     system (@sysargs) == 0 or print "Unable to run @sysargs, $! ";
   }
 }
-
-
