@@ -18,11 +18,21 @@ my $commiter = (getpwuid($>))[0] . '@' . hostfqdn();
 unless ( -d "$repo" ) { die "No such directory $repo, $!"; }
 
 while (defined(my $line = $log->read)) {
-  if ( $line =~ m{named\[\d+\]: client (\S+?)/key ([^:]+): updating zone '(.+?)/IN': (.+)} ) {
-    my $client="$1";
-    my $key="$2";
-    my $zone="$3";
-    my $change="$4";
+    my ($client, $key, $zone, $change);
+
+    if ( $line =~ m{named\[\d+\]: client (\S+?)/key ([^:]+): updating zone '(.+?)/IN': (.+)} ) {
+      $client="$1";
+      $key="$2";
+      $zone="$3";
+      $change="$4";
+    } elsif ( $line =~ m{named\[\d+\]: thawing zone '(.+?)/IN': success} ) {
+      $client='localhost';
+      $key='thaw';
+      $zone="$1";
+      $change='manual edit';
+    } else {
+      next;
+    }
 
     #print "DEBUG: client: $client, key: $key, zone: $zone, change: $change\n";
 
@@ -68,5 +78,4 @@ while (defined(my $line = $log->read)) {
     system (@sysargs) == 0 or print "Unable to run @sysargs, change might be within one single zone file. $! ";
     @sysargs = ($git, 'push');
     system (@sysargs) == 0 or print "Unable to run @sysargs, $! ";
-  }
 }
